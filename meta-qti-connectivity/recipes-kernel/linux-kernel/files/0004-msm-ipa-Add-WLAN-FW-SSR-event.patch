@@ -1,0 +1,66 @@
+From bd3b183b6b35341c70deeccd9722f09faaa031da Mon Sep 17 00:00:00 2001
+From: Mohammed Javid <mjavid@codeaurora.org>
+Date: Mon, 25 Jun 2018 18:58:20 +0530
+Subject: [PATCH 4/8] msm: ipa: Add WLAN FW SSR event
+
+Add WLAN FW SSR event to handle FW rejuvenate
+scenario.
+
+Change-Id: I417d46cc07f455792906a18f4b6dc8e5ca8ca3de
+Acked-by: Pooja Kumari <kumarip@qti.qualcomm.com>
+Signed-off-by: Mohammed Javid <mjavid@codeaurora.org>
+---
+ drivers/platform/msm/ipa/ipa_v2/ipa_debugfs.c | 1 +
+ drivers/platform/msm/ipa/ipa_v3/ipa_debugfs.c | 1 +
+ include/uapi/linux/msm_ipa.h                  | 9 +++++++--
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/platform/msm/ipa/ipa_v2/ipa_debugfs.c b/drivers/platform/msm/ipa/ipa_v2/ipa_debugfs.c
+index 1a704ff..fd710f8 100644
+--- a/drivers/platform/msm/ipa/ipa_v2/ipa_debugfs.c
++++ b/drivers/platform/msm/ipa/ipa_v2/ipa_debugfs.c
+@@ -89,6 +89,7 @@ const char *ipa_event_name[] = {
+ 	__stringify(DEL_L2TP_VLAN_MAPPING),
+ 	__stringify(IPA_PER_CLIENT_STATS_CONNECT_EVENT),
+ 	__stringify(IPA_PER_CLIENT_STATS_DISCONNECT_EVENT),
++	__stringify(WLAN_FWR_SSR_BEFORE_SHUTDOWN),
+ };
+ 
+ const char *ipa_hdr_l2_type_name[] = {
+diff --git a/drivers/platform/msm/ipa/ipa_v3/ipa_debugfs.c b/drivers/platform/msm/ipa/ipa_v3/ipa_debugfs.c
+index eb9a687..d7bc369 100644
+--- a/drivers/platform/msm/ipa/ipa_v3/ipa_debugfs.c
++++ b/drivers/platform/msm/ipa/ipa_v3/ipa_debugfs.c
+@@ -70,6 +70,7 @@ const char *ipa3_event_name[] = {
+ 	__stringify(DEL_L2TP_VLAN_MAPPING),
+ 	__stringify(IPA_PER_CLIENT_STATS_CONNECT_EVENT),
+ 	__stringify(IPA_PER_CLIENT_STATS_DISCONNECT_EVENT),
++	__stringify(WLAN_FWR_SSR_BEFORE_SHUTDOWN),
+ };
+ 
+ const char *ipa3_hdr_l2_type_name[] = {
+diff --git a/include/uapi/linux/msm_ipa.h b/include/uapi/linux/msm_ipa.h
+index 6a471c9..e61e128 100644
+--- a/include/uapi/linux/msm_ipa.h
++++ b/include/uapi/linux/msm_ipa.h
+@@ -466,10 +466,15 @@ enum ipa_per_client_stats_event {
+ 	IPA_PER_CLIENT_STATS_CONNECT_EVENT = IPA_VLAN_L2TP_EVENT_MAX,
+ 	IPA_PER_CLIENT_STATS_DISCONNECT_EVENT,
+ 	IPA_PER_CLIENT_STATS_EVENT_MAX,
+-	IPA_EVENT_MAX_NUM = IPA_PER_CLIENT_STATS_EVENT_MAX,
+ };
+ 
+-#define IPA_EVENT_MAX_NUM ((int)IPA_PER_CLIENT_STATS_EVENT_MAX)
++enum ipa_wlan_fw_ssr_event {
++	WLAN_FWR_SSR_BEFORE_SHUTDOWN = IPA_PER_CLIENT_STATS_EVENT_MAX,
++	IPA_WLAN_FW_SSR_EVENT_MAX,
++#define IPA_WLAN_FW_SSR_EVENT_MAX IPA_WLAN_FW_SSR_EVENT_MAX
++};
++
++#define IPA_EVENT_MAX_NUM ((int)IPA_WLAN_FW_SSR_EVENT_MAX)
+ #define IPA_EVENT_MAX ((int)IPA_EVENT_MAX_NUM)
+ 
+ /**
+-- 
+1.9.1
+

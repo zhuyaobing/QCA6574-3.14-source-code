@@ -1,0 +1,1733 @@
+From 39414e65ea85f684b2ec38037c6fa81c11ab0861 Mon Sep 17 00:00:00 2001
+From: Qun Zhang <qunz@codeaurora.org>
+Date: Tue, 11 Sep 2018 15:21:59 +0800
+Subject: [PATCH] Add cnss2 support for two PCIe wlan card
+
+When two PCIe wlan cards are enabled by using Qcacld3.0 driver,
+need add special support on cnss2 layer for the use case.
+
+In two PCIe wlan cards use case, since cnss_pci_driver is registered
+during the first device platform probe, so when the second device
+platform probe happen, cnss_pci_driver probe would be called before
+the second device enumerate finish. cnss_pci_driver probe have suspend
+PCIe link action, this action will make enumerate fail. Make sure
+enumerate finish before suspend PCIe link.
+
+Change-Id: I901a8808895d941d7257027c67a193b4e462f4c6
+Signed-off-by: Qun Zhang <qunz@codeaurora.org>
+---
+ arch/arm/boot/dts/qcom/msm8996.dtsi            |  31 +-
+ drivers/net/wireless/cnss2/Kconfig             |   2 +
+ drivers/net/wireless/cnss2/Makefile            |   1 +
+ drivers/net/wireless/cnss2/debug.c             |  24 +-
+ drivers/net/wireless/cnss2/logger/Kconfig      |   6 +
+ drivers/net/wireless/cnss2/logger/Makefile     |   6 +
+ drivers/net/wireless/cnss2/logger/debugfs.c    | 134 ++++++++
+ drivers/net/wireless/cnss2/logger/logger.h     | 102 ++++++
+ drivers/net/wireless/cnss2/logger/main.c       |  55 +++
+ drivers/net/wireless/cnss2/logger/nl_service.c | 446 +++++++++++++++++++++++++
+ drivers/net/wireless/cnss2/main.c              | 152 +++++++--
+ drivers/net/wireless/cnss2/main.h              |  12 +
+ drivers/net/wireless/cnss2/pci.c               |  62 +++-
+ drivers/net/wireless/cnss2/power.c             | 149 ++++++---
+ include/net/cnss_logger.h                      |  59 ++++
+ 15 files changed, 1149 insertions(+), 92 deletions(-)
+ create mode 100644 drivers/net/wireless/cnss2/logger/Kconfig
+ create mode 100644 drivers/net/wireless/cnss2/logger/Makefile
+ create mode 100644 drivers/net/wireless/cnss2/logger/debugfs.c
+ create mode 100644 drivers/net/wireless/cnss2/logger/logger.h
+ create mode 100644 drivers/net/wireless/cnss2/logger/main.c
+ create mode 100644 drivers/net/wireless/cnss2/logger/nl_service.c
+ create mode 100644 include/net/cnss_logger.h
+
+diff --git a/arch/arm/boot/dts/qcom/msm8996.dtsi b/arch/arm/boot/dts/qcom/msm8996.dtsi
+index 73ae1b8..453ce0c 100644
+--- a/arch/arm/boot/dts/qcom/msm8996.dtsi
++++ b/arch/arm/boot/dts/qcom/msm8996.dtsi
+@@ -2366,7 +2366,7 @@
+ 		memory-region = <&peripheral_mem>;
+ 	};
+ 
+-	qcom,cnss {
++	cnss0: qcom,cnss-pcie0 {
+ 		compatible = "qcom,cnss";
+ 		wlan-bootstrap-gpio = <&tlmm 46 0>;
+ 		vdd-wlan-en-supply = <&wlan_en_vreg>;
+@@ -2397,6 +2397,35 @@
+ 					<45 512 207108 14432000>;
+ 	};
+ 
++	cnss2: qcom,cnss-pcie2 {
++		compatible = "qcom,cnss";
++		wlan-bootstrap-gpio = <&tlmm 46 0>;
++		wlan-en-gpio = <&tlmm 87 0>;
++		vdd-wlan-supply = <&rome_vreg>;
++		vdd-wlan-io-supply = <&pm8994_s4>;
++		vdd-wlan-xtal-supply = <&pm8994_l30>;
++		vdd-wlan-core-supply = <&pm8994_s3>;
++		wlan-ant-switch-supply = <&pm8994_l18_pin_ctrl>;
++		qcom,notify-modem-status;
++		pinctrl-names = "wlan_en_active", "wlan_en_sleep";
++		pinctrl-0 = <&cnss_bootstrap_active>;
++		pinctrl-1 = <&cnss_bootstrap_sleep>;
++		qcom,wlan-rc-num = <2>;
++		qcom,wlan-ramdump-dynamic = <0x200000>;
++		qcom,msm-bus,name = "msm-cnss";
++		qcom,msm-bus,num-cases = <4>;
++		qcom,msm-bus,num-paths = <1>;
++		qcom,msm-bus,vectors-KBps =
++					/* No vote */
++					<45 512 0 0>,
++					/* Up to 200 Mbps */
++					<45 512 41421 1520000>,
++					/* Up to 400 Mbps */
++					<45 512 96650 1520000>,
++					/* Up to 800 Mbps */
++					<45 512 207108 14432000>;
++	};
++
+ 	wil6210: qcom,wil6210 {
+ 		compatible = "qcom,wil6210";
+ 		qcom,pcie-parent = <&pcie1>;
+diff --git a/drivers/net/wireless/cnss2/Kconfig b/drivers/net/wireless/cnss2/Kconfig
+index 8bc9cc61..d847420 100644
+--- a/drivers/net/wireless/cnss2/Kconfig
++++ b/drivers/net/wireless/cnss2/Kconfig
+@@ -16,3 +16,5 @@ config CNSS2_DEBUG
+ 	  primarily includes providing additional verbose logs for certain
+ 	  features, enabling kernel panic for certain cases to aid the
+ 	  debugging, and enabling any other debug mechanisms.
++
++source "drivers/net/wireless/cnss2/logger/Kconfig"
+diff --git a/drivers/net/wireless/cnss2/Makefile b/drivers/net/wireless/cnss2/Makefile
+index b49d089..a7dfe38 100644
+--- a/drivers/net/wireless/cnss2/Makefile
++++ b/drivers/net/wireless/cnss2/Makefile
+@@ -6,3 +6,4 @@ cnss2-y += pci.o
+ cnss2-y += power.o
+ cnss2-y += qmi.o
+ cnss2-y += wlan_firmware_service_v01.o
++obj-$(CONFIG_CNSS_LOGGER) += logger/
+diff --git a/drivers/net/wireless/cnss2/debug.c b/drivers/net/wireless/cnss2/debug.c
+index 5e2d44c..6572c2b 100644
+--- a/drivers/net/wireless/cnss2/debug.c
++++ b/drivers/net/wireless/cnss2/debug.c
+@@ -20,6 +20,7 @@
+ #define CNSS_IPC_LOG_PAGES		32
+ 
+ void *cnss_ipc_log_context;
++static struct dentry *cnss_root_dentry;
+ 
+ static int cnss_pin_connect_show(struct seq_file *s, void *data)
+ {
+@@ -447,9 +448,15 @@ static int cnss_create_debug_only_node(struct cnss_plat_data *plat_priv)
+ int cnss_debugfs_create(struct cnss_plat_data *plat_priv)
+ {
+ 	int ret = 0;
++	const char *name;
+ 	struct dentry *root_dentry;
+ 
+-	root_dentry = debugfs_create_dir("cnss", 0);
++	if (plat_priv->rc_idx)
++		name = "cnss_pcie2";
++	else
++		name = "cnss_pcie0";
++
++	root_dentry = debugfs_create_dir(name, cnss_root_dentry);
+ 	if (IS_ERR(root_dentry)) {
+ 		ret = PTR_ERR(root_dentry);
+ 		cnss_pr_err("Unable to create debugfs %d\n", ret);
+@@ -483,7 +490,17 @@ int cnss_debug_init(void)
+ 		return -EINVAL;
+ 	}
+ 
++	cnss_root_dentry = debugfs_create_dir("cnss", 0);
++	if (!cnss_root_dentry) {
++		cnss_pr_err("Failed to create cnss root debug dentry\n");
++		goto err_debugfs;
++	}
++
+ 	return 0;
++
++err_debugfs:
++	ipc_log_context_destroy(cnss_ipc_log_context);
++	cnss_ipc_log_context = NULL;
+ }
+ 
+ void cnss_debug_deinit(void)
+@@ -492,4 +509,9 @@ void cnss_debug_deinit(void)
+ 		ipc_log_context_destroy(cnss_ipc_log_context);
+ 		cnss_ipc_log_context = NULL;
+ 	}
++
++	if (cnss_root_dentry) {
++		debugfs_remove_recursive(cnss_root_dentry);
++		cnss_root_dentry = NULL;
++	}
+ }
+diff --git a/drivers/net/wireless/cnss2/logger/Kconfig b/drivers/net/wireless/cnss2/logger/Kconfig
+new file mode 100644
+index 0000000..85b6992
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/Kconfig
+@@ -0,0 +1,6 @@
++config CNSS_LOGGER
++	tristate "CNSS Logging Service Driver"
++	---help---
++	  This module adds support for the CNSS Logging Service for CLD
++	  driver, including the netlink socket service registration, transmit,
++	  event receive.
+diff --git a/drivers/net/wireless/cnss2/logger/Makefile b/drivers/net/wireless/cnss2/logger/Makefile
+new file mode 100644
+index 0000000..1e296a3
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/Makefile
+@@ -0,0 +1,6 @@
++obj-$(CONFIG_CNSS_LOGGER) += logger.o
++
++logger-y += main.o	\
++	    nl_service.o
++
++logger-$(CONFIG_DEBUG_FS) += debugfs.o
+diff --git a/drivers/net/wireless/cnss2/logger/debugfs.c b/drivers/net/wireless/cnss2/logger/debugfs.c
+new file mode 100644
+index 0000000..72d0a18
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/debugfs.c
+@@ -0,0 +1,134 @@
++/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/module.h>
++#include <linux/debugfs.h>
++
++#include "logger.h"
++
++#define CNSS_LOGGER_STATE_DUMP_BUFFER	(2 * 1024) /* 2KB */
++
++static int logger_state_dump_device(struct logger_device *dev, char *buf,
++				    int buf_len)
++{
++	int len = 0;
++	struct logger_event_handler *cur;
++
++	len += scnprintf(buf + len, buf_len - len,
++			"==============================================\n");
++
++	len += scnprintf(buf + len, buf_len - len,
++			"driver [%s] is registered with radio index: %d\n",
++			dev->name, dev->radio_idx);
++
++	if (list_empty(&dev->event_list)) {
++		len += scnprintf(buf + len, buf_len - len,
++				 "No event registered!\n");
++		return len;
++	}
++
++	list_for_each_entry(cur, &dev->event_list, list) {
++		len += scnprintf(buf + len, buf_len - len,
++				"\t event %d\n", cur->event);
++	}
++	len += scnprintf(buf + len, buf_len - len, "\n");
++
++	return len;
++}
++
++static int logger_state_dump(struct logger_context *ctx, char *buf, int buf_len)
++{
++	int len = 0;
++	struct logger_device *cur;
++
++	if (list_empty(&ctx->dev_list)) {
++		len += scnprintf(buf + len, buf_len - len,
++				 "=======================\n");
++		len += scnprintf(buf + len, buf_len - len,
++				 "No driver registered!\n");
++		return 0;
++	}
++
++	list_for_each_entry(cur, &ctx->dev_list, list)
++		len += logger_state_dump_device(cur, (buf + len), buf_len);
++
++	return 0;
++}
++
++static int logger_state_open(struct inode *inode, struct file *file)
++{
++	struct logger_context *ctx = inode->i_private;
++	void *buf;
++	int ret;
++
++	mutex_lock(&ctx->con_mutex);
++
++	buf = kmalloc(CNSS_LOGGER_STATE_DUMP_BUFFER, GFP_KERNEL);
++	if (!buf) {
++		ret = -ENOMEM;
++		goto error_unlock;
++	}
++
++	ret = logger_state_dump(ctx, buf, CNSS_LOGGER_STATE_DUMP_BUFFER);
++	if (ret)
++		goto error_free;
++
++	file->private_data = buf;
++	mutex_unlock(&ctx->con_mutex);
++	return 0;
++
++error_free:
++	kfree(buf);
++
++error_unlock:
++	mutex_unlock(&ctx->con_mutex);
++
++	return ret;
++}
++
++static int logger_state_release(struct inode *inode, struct file *file)
++{
++	kfree(file->private_data);
++	return 0;
++}
++
++static ssize_t logger_state_read(struct file *file, char __user *user_buf,
++				 size_t count, loff_t *ppos)
++{
++	const char *buf = file->private_data;
++	unsigned int len = strlen(buf);
++
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations fops_logger_state = {
++	.open = logger_state_open,
++	.release = logger_state_release,
++	.read = logger_state_read,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
++void logger_debugfs_init(struct logger_context *ctx)
++{
++	if (!ctx->debugfs_entry)
++		ctx->debugfs_entry = debugfs_create_dir("cnss_logger", NULL);
++
++	debugfs_create_file("state", S_IRUSR, ctx->debugfs_entry, ctx,
++			    &fops_logger_state);
++}
++
++void logger_debugfs_remove(struct logger_context *ctx)
++{
++	debugfs_remove(ctx->debugfs_entry);
++}
++
+diff --git a/drivers/net/wireless/cnss2/logger/logger.h b/drivers/net/wireless/cnss2/logger/logger.h
+new file mode 100644
+index 0000000..efaead2
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/logger.h
+@@ -0,0 +1,102 @@
++/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++#ifndef _LOGGER_H_
++#define _LOGGER_H_
++
++#include <linux/module.h>
++#include <linux/list.h>
++#include <net/sock.h>
++#include <linux/netlink.h>
++#include <linux/skbuff.h>
++
++#define CNSS_LOGGER_NL_MCAST_GRP_ID	0x01
++#define CNSS_LOGGER_NL_MAX_PAYLOAD	256
++#define CNSS_LOGGER_BROADCAST_ID	255
++
++/**
++ * struct aninlmsg - the wireless service message header
++ * @nlh:	the netlink message header
++ * @radio:	the radio index of this message
++ * @wmsg:	the pointer to the wireless message data
++ */
++struct aninlmsg {
++	struct  nlmsghdr *nlh;
++	int radio;
++	void *wmsg;
++};
++
++/**
++ * struct logger_event_handler - the logger event handler structure
++ * @list:	the event list associated to the same device
++ * @event:	the event number
++ * @radio_idx:	the callback handler
++ */
++struct logger_event_handler {
++	struct list_head list;
++
++	int event;
++	int (*cb)(struct sk_buff *skb);
++};
++
++/**
++ * struct logger_device - the logger device structure
++ * @list:	the device list registered to logger module
++ * @event_list:	the event list registered to this device
++ * @ctx:	the pointer to the logger context
++ * @wiphy:	the wiphy that associated to the device
++ * @name:	the name of the device driver module
++ * @radio_idx:	the radio index assigned to this device
++ */
++struct logger_device {
++	struct list_head list;
++	struct list_head event_list;
++
++	struct logger_context *ctx;
++	struct wiphy *wiphy;
++	char name[MODULE_NAME_LEN];
++	int radio_idx;
++};
++
++/**
++ * struct logger_context - the main context block for logger module
++ * @dev_list:	this is the list to maintain the devices that registered
++ *		to use the logger module feature
++ * @nl_sock:	the netlink socket to share accros the module
++ * @con_mutex:	the mutex to protect concurrent access
++ * @data_lock:	the lock to protect shared data
++ * @radio_mask: this mask would maintain the radio index assign and release
++ */
++struct logger_context {
++	struct list_head dev_list;
++
++	struct sock *nl_sock;
++	struct mutex con_mutex; /* concurrent access mutex */
++	spinlock_t data_lock;
++	unsigned long radio_mask; /* support up to 4 drivers registration? */
++#ifdef CONFIG_DEBUG_FS
++	struct dentry *debugfs_entry;
++#endif
++};
++
++int logger_netlink_init(struct logger_context *ctx);
++int logger_netlink_deinit(struct logger_context *ctx);
++struct logger_context *logger_get_ctx(void);
++
++#ifdef CONFIG_DEBUG_FS
++void logger_debugfs_init(struct logger_context *ctx);
++void logger_debugfs_remove(struct logger_context *ctx);
++#else
++static inline void logger_debugfs_init(struct logger_context *ctx) {}
++static inline void logger_debugfs_remove(struct logger_context *ctx) {}
++#endif
++
++#endif /* _LOGGER_H_ */
+diff --git a/drivers/net/wireless/cnss2/logger/main.c b/drivers/net/wireless/cnss2/logger/main.c
+new file mode 100644
+index 0000000..9d3d2fc
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/main.c
+@@ -0,0 +1,55 @@
++/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/export.h>
++#include <net/cnss_logger.h>
++#include "logger.h"
++
++static struct logger_context *ctx;
++
++struct logger_context *logger_get_ctx(void)
++{
++	return ctx;
++}
++
++static int __init logger_module_init(void)
++{
++	int ret;
++
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ret = logger_netlink_init(ctx);
++
++	mutex_init(&ctx->con_mutex);
++	spin_lock_init(&ctx->data_lock);
++	logger_debugfs_init(ctx);
++
++	return ret;
++}
++
++static void __exit logger_module_exit(void)
++{
++	logger_debugfs_remove(ctx);
++	logger_netlink_deinit(ctx);
++
++	kfree(ctx);
++}
++
++module_init(logger_module_init);
++module_exit(logger_module_exit);
++
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("CNSS Logging Service Driver");
+diff --git a/drivers/net/wireless/cnss2/logger/nl_service.c b/drivers/net/wireless/cnss2/logger/nl_service.c
+new file mode 100644
+index 0000000..565cb3a
+--- /dev/null
++++ b/drivers/net/wireless/cnss2/logger/nl_service.c
+@@ -0,0 +1,446 @@
++/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++#define pr_fmt(fmt) "cnss_logger: %s: "fmt, __func__
++
++#include <linux/kernel.h>
++#include <linux/export.h>
++#include <linux/module.h>
++#include <linux/export.h>
++#include <net/cnss_logger.h>
++#include "logger.h"
++
++static DEFINE_MUTEX(logger_sem);
++
++/**
++ * logger_get_radio_idx() - to get the radio index
++ * @ctx: the logger context pointer
++ *
++ * Return: the first available radio index, otherwise failure code
++ */
++static int logger_get_radio_idx(struct logger_context *ctx)
++{
++	int i;
++
++	for (i = 0; i < sizeof(ctx->radio_mask); i++) {
++		if (!test_and_set_bit(i, &ctx->radio_mask))
++			return i;
++	}
++	return -EINVAL;
++}
++
++/**
++ * logger_put_radio_idx() - to release the radio index
++ * @radio: the radio index to release
++ *
++ * Return: None
++ */
++static void logger_put_radio_idx(struct logger_context *ctx, int radio)
++{
++	clear_bit(radio, &ctx->radio_mask);
++}
++
++/**
++ * logger_get_device() - to get the logger device per radio index
++ * @radio: the radio index
++ *
++ * Return: the logger_device pointer, otherwise return NULL.
++ */
++static struct logger_device *logger_get_device(int radio)
++{
++	struct logger_device *dev;
++	struct logger_context *ctx;
++
++	ctx = logger_get_ctx();
++	if (!ctx)
++		return NULL;
++
++	list_for_each_entry(dev, &ctx->dev_list, list) {
++		if (dev->radio_idx == radio)
++			return dev;
++	}
++	return NULL;
++}
++
++/**
++ * logger_device_is_registered() - to check if device has been registered
++ * @dev: pointer to logger device
++ * @wiphy: the wiphy pointer of the device to register
++ *
++ * This helper function is to check if this device has been registered.
++ *
++ * Return: NULL if it has not, otherwise return the logger_device pointer.
++ */
++static struct logger_device *logger_device_is_registered(
++						 struct logger_context *ctx,
++						 struct wiphy *wiphy)
++{
++	struct logger_device *dev;
++
++	list_for_each_entry(dev, &ctx->dev_list, list) {
++		if (dev->wiphy == wiphy)
++			return dev;
++	}
++	return NULL;
++}
++
++/**
++ * logger_dispatch_skb() - to dispatch the skb to devices
++ * @skb: the socket buffer received and to dispatch
++ *
++ * The function will look up the header of the skb, and dispatch the skb
++ * to the associated event and device that registered.
++ *
++ * Return: 0 if successfully dispatch, otherwise failure code
++ */
++static int logger_dispatch_skb(struct sk_buff *skb)
++{
++	pr_info("skb_len: %d, skb_data_len: %d\n",
++		skb->len, skb->data_len);
++
++	return 0;
++}
++
++/**
++ * logger_flush_event_handle() - to flush the event handle associate to device
++ * @dev: pointer to logger device
++ *
++ * The function will clean up all the event handle's resource, take it out
++ * from the list, and free the memory allocated.
++ *
++ * Return: None
++ */
++static void logger_flush_event_handle(struct logger_device *dev)
++{
++	struct list_head *pos, *temp;
++	struct logger_event_handler *cur;
++
++	list_for_each_safe(pos, temp, &dev->event_list) {
++		cur = container_of(pos, struct logger_event_handler, list);
++		pr_info("radio: %d, event: %d unregistered!\n",
++			dev->radio_idx, cur->event);
++		list_del(&cur->list);
++		kfree(cur);
++	}
++}
++
++/**
++ * logger_flush_devices() - to flush the devices infomration
++ * @dev: pointer to logger device
++ *
++ * The helper function to flush the device information, all the device clean
++ * up prcoess should be starting from here.
++ *
++ * Return: None
++ */
++static void logger_flush_devices(struct logger_device *dev)
++{
++	pr_info("driver: [%s] and radio-%d is unregistered\n",
++		dev->name, dev->radio_idx);
++	logger_flush_event_handle(dev);
++	logger_put_radio_idx(dev->ctx, dev->radio_idx);
++	list_del(&dev->list);
++	kfree(dev);
++}
++
++/**
++ * logger_register_device_event() - register the evet to device
++ * @dev: pointer to logger device
++ * @event: the event to register
++ * @cb: the callback associated to the device and event
++ *
++ * Return: 0 if register successfully, otherwise the failure code
++ */
++static int logger_register_device_event(struct logger_device *dev, int event,
++					int (*cb)(struct sk_buff *skb))
++{
++	struct logger_event_handler *cur;
++
++	list_for_each_entry(cur, &dev->event_list, list) {
++		if (cur->event == event) {
++			pr_info("event %d, is already added\n", event);
++			return 0;
++		}
++	}
++
++	cur = kmalloc(sizeof(*cur), GFP_KERNEL);
++	if (!cur)
++		return -ENOMEM;
++
++	cur->event = event;
++	cur->cb = cb;
++
++	pr_info("radio: %d, event: %d\n", dev->radio_idx, cur->event);
++	list_add_tail(&cur->list, &dev->event_list);
++
++	return 0;
++}
++
++/**
++ * logger_unregister_device_event() - unregister the evet from device
++ * @dev: pointer to logger device
++ * @event: the event to unregister
++ * @cb: the callback associated to the device and event
++ *
++ * Return: 0 if unregister successfully, otherwise the failure code
++ */
++static int logger_unregister_device_event(struct logger_device *dev, int event,
++					  int (*cb)(struct sk_buff *skb))
++{
++	struct list_head *pos, *temp;
++	struct logger_event_handler *cur;
++
++	list_for_each_safe(pos, temp, &dev->event_list) {
++		cur = container_of(pos, struct logger_event_handler, list);
++		if (cur->event == event && cur->cb == cb) {
++			pr_info("radio: %d, event: %d\n",
++				dev->radio_idx, cur->event);
++			list_del(&cur->list);
++			kfree(cur);
++			return 0;
++		}
++	}
++	return -ENOENT;
++}
++
++/**
++ * logger_skb_input() - the callback to receive the skb
++ * @skb: the receive socket buffer
++ *
++ * Return: None
++ */
++static void logger_skb_input(struct sk_buff *skb)
++{
++	mutex_lock(&logger_sem);
++	logger_dispatch_skb(skb);
++	mutex_unlock(&logger_sem);
++}
++
++/**
++ * cnss_logger_event_register() - register the event
++ * @radio: the radio index to register
++ * @event: the event to register
++ * @cb: the callback
++ *
++ * This function is used to register event associated to the radio index.
++ *
++ * Return: 0 if register success, otherwise failure code
++ */
++int cnss_logger_event_register(int radio, int event,
++			       int (*cb)(struct sk_buff *skb))
++{
++	int ret = -ENOENT;
++	struct logger_device *dev;
++
++	dev = logger_get_device(radio);
++	if (dev)
++		ret = logger_register_device_event(dev, event, cb);
++
++	return ret;
++}
++EXPORT_SYMBOL(cnss_logger_event_register);
++
++/**
++ * cnss_logger_event_unregister() - unregister the event
++ * @radio: the radio index to unregister
++ * @event: the event to unregister
++ * @cb: the callback
++ *
++ * This function is used to unregister the event from cnss logger module.
++ *
++ * Return: 0 if unregister success, otherwise failure code
++ */
++int cnss_logger_event_unregister(int radio, int event,
++				 int (*cb)(struct sk_buff *skb))
++{
++	int ret = -ENOENT;
++	struct logger_device *dev;
++
++	dev = logger_get_device(radio);
++	if (dev)
++		ret = logger_unregister_device_event(dev, event, cb);
++
++	return ret;
++}
++EXPORT_SYMBOL(cnss_logger_event_unregister);
++
++/**
++ * cnss_logger_device_register() - register the driver
++ * @wiphy: the wiphy device to unregister
++ * @name: the module name of the driver
++ *
++ * This function is used to register the driver to cnss logger module,
++ * this will indicate the existence of the driver, and also assign the
++ * radio index for further operation.
++ *
++ * Return: the radio index if register successful, otherwise failure code
++ */
++int cnss_logger_device_register(struct wiphy *wiphy, const char *name)
++{
++	int radio;
++	struct logger_context *ctx;
++	struct logger_device *new;
++
++	ctx = logger_get_ctx();
++	if (!ctx)
++		return -ENOENT;
++
++	/* sanity check, already registered? */
++	new = logger_device_is_registered(ctx, wiphy);
++	if (new)
++		return new->radio_idx;
++
++	radio = logger_get_radio_idx(ctx);
++	if (radio < 0) {
++		pr_err("driver registration is full!\n");
++		return -ENOMEM;
++	}
++
++	new = kmalloc(sizeof(*new), GFP_KERNEL);
++	if (!new) {
++		logger_put_radio_idx(ctx, radio);
++		return -ENOMEM;
++	}
++
++	new->radio_idx = radio;
++	new->wiphy = wiphy;
++	new->ctx = ctx;
++	strlcpy(new->name, name, sizeof(new->name));
++	INIT_LIST_HEAD(&new->event_list);
++
++	list_add(&new->list, &ctx->dev_list);
++
++	pr_info("driver: [%s] is registered as radio-%d\n",
++		new->name, new->radio_idx);
++
++	return new->radio_idx;
++}
++EXPORT_SYMBOL(cnss_logger_device_register);
++
++/**
++ * cnss_logger_device_unregister() - unregister the driver
++ * @radio: the radio to unregister
++ * @wiphy: the wiphy device to unregister
++ *
++ * This function is used to unregister the driver from cnss logger module.
++ * This will disable the driver to access the interface in cnss logger,
++ * and also all the related events that registered will be reset.
++ *
++ * Return: 0 if success, otherwise failure code
++ */
++int cnss_logger_device_unregister(int radio, struct wiphy *wiphy)
++{
++	struct logger_context *ctx;
++	struct logger_device *cur;
++	struct list_head *pos, *temp;
++
++	ctx = logger_get_ctx();
++	if (!ctx)
++		return -ENOENT;
++
++	list_for_each_safe(pos, temp, &ctx->dev_list) {
++		cur = list_entry(pos, struct logger_device, list);
++		if (cur->radio_idx == radio && cur->wiphy == wiphy) {
++			logger_flush_devices(cur);
++			break;
++		}
++	}
++	return 0;
++}
++EXPORT_SYMBOL(cnss_logger_device_unregister);
++
++/**
++ * cnss_logger_nl_ucast() - nl interface to unicast the buffer
++ * @skb: the socket buffer to transmit
++ * @portid: netlink portid of the destination socket
++ * @flag: the flag to indicate if this is a nonblock call
++ *
++ * Return: 0 if success, otherwise failure code
++ */
++int cnss_logger_nl_ucast(struct sk_buff *skb, int portid, int flag)
++{
++	struct logger_context *ctx;
++
++	ctx = logger_get_ctx();
++	if (!ctx) {
++		dev_kfree_skb(skb);
++		return -ENOENT;
++	}
++
++	return netlink_unicast(ctx->nl_sock, skb, portid, flag);
++}
++EXPORT_SYMBOL(cnss_logger_nl_ucast);
++
++/**
++ * cnss_logger_nl_bcast() - nl interface to broadcast the buffer
++ * @skb: the socket buffer to transmit
++ * @portid: netlink portid of the destination socket
++ * @flag: the gfp_t flag
++ *
++ * Return: 0 if success, otherwise failure code
++ */
++int cnss_logger_nl_bcast(struct sk_buff *skb, int portid, int flag)
++{
++	struct logger_context *ctx;
++
++	ctx = logger_get_ctx();
++	if (!ctx) {
++		dev_kfree_skb(skb);
++		return -ENOENT;
++	}
++
++	return netlink_broadcast(ctx->nl_sock, skb, 0, portid, flag);
++}
++EXPORT_SYMBOL(cnss_logger_nl_bcast);
++
++/**
++ * logger_netlink_init() - initialize the netlink socket
++ * @ctx: the cnss logger context pointer
++ *
++ * Return: the netlink handle if success, otherwise failure code
++ */
++int logger_netlink_init(struct logger_context *ctx)
++{
++	struct netlink_kernel_cfg cfg = {
++		.groups	= CNSS_LOGGER_NL_MCAST_GRP_ID,
++		.input	= logger_skb_input,
++	};
++
++	ctx->nl_sock = netlink_kernel_create(&init_net, NETLINK_USERSOCK, &cfg);
++	if (ctx->nl_sock == NULL) {
++		pr_err("cnss_logger: Cannot create netlink socket");
++		return -ENOMEM;
++	}
++
++	INIT_LIST_HEAD(&ctx->dev_list);
++
++	return 0;
++}
++
++/**
++ * logger_netlink_deinit() - release the netlink socket and other resource
++ * @ctx: the cnss logger context pointer
++ *
++ * Return: 0 if success, otherwise failure code
++ */
++int logger_netlink_deinit(struct logger_context *ctx)
++{
++	struct list_head *pos, *temp;
++	struct logger_device *dev;
++
++	netlink_kernel_release(ctx->nl_sock);
++	list_for_each_safe(pos, temp, &ctx->dev_list) {
++		dev = container_of(pos, struct logger_device, list);
++		logger_flush_devices(dev);
++	}
++	return 0;
++}
+diff --git a/drivers/net/wireless/cnss2/main.c b/drivers/net/wireless/cnss2/main.c
+index bcea74a..10dbd52 100644
+--- a/drivers/net/wireless/cnss2/main.c
++++ b/drivers/net/wireless/cnss2/main.c
+@@ -26,6 +26,7 @@
+ #include "debug.h"
+ #include "pci.h"
+ 
++#define CNSS_MAX_DEV_NUM		2
+ #define CNSS_DUMP_FORMAT_VER		0x11
+ #define CNSS_DUMP_FORMAT_VER_V2		0x22
+ #define CNSS_DUMP_MAGIC_VER_V2		0x42445953
+@@ -39,9 +40,9 @@
+ #define CNSS_EVENT_PENDING		2989
+ #define WAKE_MSI_NAME			"WAKE"
+ 
+-static struct cnss_plat_data *plat_env;
++static struct cnss_plat_data *plat_env[CNSS_MAX_DEV_NUM];
+ 
+-static DECLARE_RWSEM(cnss_pm_sem);
++//static DECLARE_RWSEM(cnss_pm_sem);
+ 
+ static bool qmi_bypass;
+ #ifdef CONFIG_CNSS2_DEBUG
+@@ -104,13 +105,75 @@ static enum cnss_dev_bus_type cnss_get_dev_bus_type(struct device *dev)
+ static void cnss_set_plat_priv(struct platform_device *plat_dev,
+ 			       struct cnss_plat_data *plat_priv)
+ {
+-	plat_env = plat_priv;
++	int i;
++
++	if (plat_priv) {
++		int i = plat_priv->rc_idx ? 1 : 0;
++		if (plat_env[i]) {
++			cnss_pr_err("platdrom data already registered\n");
++			return;
++		}
++		plat_env[i] = plat_priv;
++	} else {
++		for (i = 0; i < CNSS_MAX_DEV_NUM; i++) {
++			struct cnss_plat_data *pdata = plat_env[i];
++			if (pdata && pdata->plat_dev == plat_dev) {
++				devm_kfree(&plat_dev->dev, pdata);
++				plat_env[i] = NULL;
++				break;
++			}
++		}
++
++		if (i == CNSS_MAX_DEV_NUM)
++			cnss_pr_err("Can't find the platform data\n");
++	}
++}
++
++static struct cnss_plat_data *cnss_get_plat_priv_by_driver(
++				struct cnss_wlan_driver *driver_ops)
++{
++	if (!driver_ops) {
++		cnss_pr_err("No cnss driver\n");
++		return NULL;
++	}
++
++	if (memcmp(driver_ops->name, "pld_pcie_cnss0", 14) == 0)
++		return plat_env[0];
++
++	if (memcmp(driver_ops->name, "pld_pcie_cnss2", 14) == 0)
++		return plat_env[1];
++
++	cnss_pr_err("Invalid cnss driver name %s\n", driver_ops->name);
++	return NULL;
+ }
+ 
+ static struct cnss_plat_data *cnss_get_plat_priv(struct platform_device
+ 						 *plat_dev)
+ {
+-	return plat_env;
++	int i;
++	struct cnss_plat_data *pdata;
++
++	for (i = 0; i < CNSS_MAX_DEV_NUM; i++) {
++		pdata = plat_env[i];
++		if (!pdata)
++			continue;
++
++		if (plat_dev) {
++			if (plat_dev == pdata->plat_dev)
++				return pdata;
++		} else {
++			/*
++			 * When pci device first time probed, no plat_dev here.
++			 * We must get one clear plat_env without device probed.
++			 */
++			if (!pdata->bus_priv) {
++				cnss_pr_dbg("Get plat_env %d addr 0x%p\n", i, pdata);
++				return pdata;
++			}
++		}
++	}
++
++	return NULL;
+ }
+ 
+ void *cnss_bus_dev_to_bus_priv(struct device *dev)
+@@ -145,6 +208,7 @@ struct cnss_plat_data *cnss_bus_dev_to_plat_priv(struct device *dev)
+ 	}
+ }
+ 
++/*
+ static int cnss_pm_notify(struct notifier_block *b,
+ 			  unsigned long event, void *p)
+ {
+@@ -163,6 +227,7 @@ static int cnss_pm_notify(struct notifier_block *b,
+ static struct notifier_block cnss_pm_notifier = {
+ 	.notifier_call = cnss_pm_notify,
+ };
++*/
+ 
+ static void cnss_pm_stay_awake(struct cnss_plat_data *plat_priv)
+ {
+@@ -192,13 +257,13 @@ static void cnss_pm_relax(struct cnss_plat_data *plat_priv)
+ 
+ void cnss_lock_pm_sem(struct device *dev)
+ {
+-	down_read(&cnss_pm_sem);
++	//down_read(&cnss_pm_sem);
+ }
+ EXPORT_SYMBOL(cnss_lock_pm_sem);
+ 
+ void cnss_release_pm_sem(struct device *dev)
+ {
+-	up_read(&cnss_pm_sem);
++	//up_read(&cnss_pm_sem);
+ }
+ EXPORT_SYMBOL(cnss_release_pm_sem);
+ 
+@@ -831,38 +896,42 @@ EXPORT_SYMBOL(cnss_power_down);
+ int cnss_wlan_register_driver(struct cnss_wlan_driver *driver_ops)
+ {
+ 	int ret = 0;
+-	struct cnss_plat_data *plat_priv = cnss_get_plat_priv(NULL);
++	struct cnss_plat_data *plat_priv =
++			cnss_get_plat_priv_by_driver(driver_ops);
+ 
+-	if (!plat_priv) {
+-		cnss_pr_err("plat_priv is NULL!\n");
++	if (!plat_priv || plat_priv->driver_ops) {
++		cnss_pr_err("Failed to register cnss driver\n");
+ 		return -ENODEV;
+ 	}
+ 
+-	if (plat_priv->driver_ops) {
+-		cnss_pr_err("Driver has already registered!\n");
+-		return -EEXIST;
++	cnss_pr_dbg("Register driver to pdata=0x%p\n", plat_priv);
++
++	ret =  cnss_driver_event_post(plat_priv,
++			CNSS_DRIVER_EVENT_REGISTER_DRIVER,
++			CNSS_EVENT_SYNC_UNINTERRUPTIBLE,
++			driver_ops);
++	if (ret) {
++		cnss_pr_err("%s: post register driver event failed\n",
++			    __func__);
++		return ret;
+ 	}
+ 
+-	ret = cnss_driver_event_post(plat_priv,
+-				     CNSS_DRIVER_EVENT_REGISTER_DRIVER,
+-				     CNSS_EVENT_SYNC_UNINTERRUPTIBLE,
+-				     driver_ops);
+-	return ret;
++	return 0;
+ }
+ EXPORT_SYMBOL(cnss_wlan_register_driver);
+ 
+ void cnss_wlan_unregister_driver(struct cnss_wlan_driver *driver_ops)
+ {
+-	struct cnss_plat_data *plat_priv = cnss_get_plat_priv(NULL);
++	struct cnss_plat_data *plat_priv =
++			cnss_get_plat_priv_by_driver(driver_ops);
+ 
+ 	if (!plat_priv) {
+-		cnss_pr_err("plat_priv is NULL!\n");
++		cnss_pr_err("%s: driver ops not registered\n", __func__);
+ 		return;
+ 	}
+-
+ 	cnss_driver_event_post(plat_priv,
+-			       CNSS_DRIVER_EVENT_UNREGISTER_DRIVER,
+-			       CNSS_EVENT_SYNC_UNINTERRUPTIBLE, NULL);
++			CNSS_DRIVER_EVENT_UNREGISTER_DRIVER,
++			CNSS_EVENT_SYNC_UNINTERRUPTIBLE, NULL);
+ }
+ EXPORT_SYMBOL(cnss_wlan_unregister_driver);
+ 
+@@ -876,6 +945,12 @@ static int cnss_get_resources(struct cnss_plat_data *plat_priv)
+ 		goto out;
+ 	}
+ 
++	ret = cnss_get_wlan_en_gpio(plat_priv);
++	if (ret) {
++		cnss_pr_err("Failed to get wlan en gpio, err = %d\n", ret);
++		goto out;
++	}
++
+ 	ret = cnss_get_pinctrl(plat_priv);
+ 	if (ret) {
+ 		cnss_pr_err("Failed to get pinctrl, err = %d\n", ret);
+@@ -1804,17 +1879,20 @@ static void cnss_driver_event_work(struct work_struct *work)
+ int cnss_register_subsys(struct cnss_plat_data *plat_priv)
+ {
+ 	int ret = 0;
++	char desc_name[32];
+ 	struct cnss_subsys_info *subsys_info;
+ 
+ 	subsys_info = &plat_priv->subsys_info;
+ 
+ 	switch (plat_priv->device_id) {
+ 	case QCA6174_DEVICE_ID:
+-		subsys_info->subsys_desc.name = "AR6320";
++		snprintf(desc_name, sizeof(desc_name),
++			 "AR6320_PCIE%d", plat_priv->rc_idx);
+ 		break;
+ 	case QCA6290_EMULATION_DEVICE_ID:
+ 	case QCA6290_DEVICE_ID:
+-		subsys_info->subsys_desc.name = "QCA6290";
++		snprintf(desc_name, sizeof(desc_name),
++			 "QCA6290_PCIE%d", plat_priv->rc_idx);
+ 		break;
+ 	default:
+ 		cnss_pr_err("Unknown device ID: 0x%lx\n", plat_priv->device_id);
+@@ -1822,6 +1900,7 @@ int cnss_register_subsys(struct cnss_plat_data *plat_priv)
+ 		goto out;
+ 	}
+ 
++	subsys_info->subsys_desc.name = desc_name;
+ 	subsys_info->subsys_desc.owner = THIS_MODULE;
+ 	subsys_info->subsys_desc.powerup = cnss_subsys_powerup;
+ 	subsys_info->subsys_desc.shutdown = cnss_subsys_shutdown;
+@@ -1875,8 +1954,9 @@ static int cnss_init_dump_entry(struct cnss_plat_data *plat_priv)
+ 	ramdump_info->dump_data.len = ramdump_info->ramdump_size;
+ 	ramdump_info->dump_data.version = CNSS_DUMP_FORMAT_VER;
+ 	ramdump_info->dump_data.magic = CNSS_DUMP_MAGIC_VER_V2;
+-	strlcpy(ramdump_info->dump_data.name, CNSS_DUMP_NAME,
+-		sizeof(ramdump_info->dump_data.name));
++	snprintf(ramdump_info->dump_data.name,
++		 sizeof(ramdump_info->dump_data.name),
++		 CNSS_DUMP_NAME "_PCIE%d", plat_priv->rc_idx);
+ 	dump_entry.id = MSM_DUMP_DATA_CNSS_WLAN;
+ 	dump_entry.addr = virt_to_phys(&ramdump_info->dump_data);
+ 
+@@ -1979,8 +2059,8 @@ static int cnss_qca6290_register_ramdump(struct cnss_plat_data *plat_priv)
+ 	dump_data->version = CNSS_DUMP_FORMAT_VER_V2;
+ 	dump_data->magic = CNSS_DUMP_MAGIC_VER_V2;
+ 	dump_data->seg_version = CNSS_DUMP_SEG_VER;
+-	strlcpy(dump_data->name, CNSS_DUMP_NAME,
+-		sizeof(dump_data->name));
++	snprintf(dump_data->name, sizeof(dump_data->name),
++		 CNSS_DUMP_NAME "_PCIE%d", plat_priv->rc_idx);
+ 	dump_entry.id = MSM_DUMP_DATA_CNSS_WLAN;
+ 	dump_entry.addr = virt_to_phys(dump_data);
+ 
+@@ -2201,6 +2281,8 @@ static int cnss_probe(struct platform_device *plat_dev)
+ 	const struct of_device_id *of_id;
+ 	const struct platform_device_id *device_id;
+ 
++	cnss_pr_dbg("%s : cnss platfrom probe\n", __func__);
++
+ 	if (cnss_get_plat_priv(plat_dev)) {
+ 		cnss_pr_err("Driver is already initialized!\n");
+ 		ret = -EEXIST;
+@@ -2223,6 +2305,13 @@ static int cnss_probe(struct platform_device *plat_dev)
+ 		goto out;
+ 	}
+ 
++	ret = of_property_read_u32(plat_dev->dev.of_node,
++				   "qcom,wlan-rc-num", &plat_priv->rc_idx);
++	if (ret) {
++		cnss_pr_err("Failed to find PCIe RC number!\n");
++		goto out;
++	}
++
+ 	plat_priv->plat_dev = plat_dev;
+ 	plat_priv->device_id = device_id->driver_data;
+ 	cnss_set_plat_priv(plat_dev, plat_priv);
+@@ -2269,7 +2358,7 @@ static int cnss_probe(struct platform_device *plat_dev)
+ 	setup_timer(&plat_priv->fw_boot_timer,
+ 		    fw_boot_timeout, (unsigned long)plat_priv);
+ 
+-	register_pm_notifier(&cnss_pm_notifier);
++	//register_pm_notifier(&cnss_pm_notifier);
+ 
+ 	ret = device_init_wakeup(&plat_dev->dev, true);
+ 	if (ret)
+@@ -2305,6 +2394,7 @@ reset_ctx:
+ 	platform_set_drvdata(plat_dev, NULL);
+ 	cnss_set_plat_priv(plat_dev, NULL);
+ out:
++
+ 	return ret;
+ }
+ 
+@@ -2314,7 +2404,7 @@ static int cnss_remove(struct platform_device *plat_dev)
+ 
+ 	complete_all(&plat_priv->power_up_complete);
+ 	device_init_wakeup(&plat_dev->dev, false);
+-	unregister_pm_notifier(&cnss_pm_notifier);
++	//unregister_pm_notifier(&cnss_pm_notifier);
+ 	del_timer(&plat_priv->fw_boot_timer);
+ 	cnss_debugfs_destroy(plat_priv);
+ 	cnss_qmi_deinit(plat_priv);
+@@ -2325,7 +2415,7 @@ static int cnss_remove(struct platform_device *plat_dev)
+ 	cnss_pci_deinit(plat_priv);
+ 	cnss_put_resources(plat_priv);
+ 	platform_set_drvdata(plat_dev, NULL);
+-	plat_env = NULL;
++	cnss_set_plat_priv(plat_dev, NULL);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/wireless/cnss2/main.h b/drivers/net/wireless/cnss2/main.h
+index 81b5de8..a2299d2 100644
+--- a/drivers/net/wireless/cnss2/main.h
++++ b/drivers/net/wireless/cnss2/main.h
+@@ -44,6 +44,13 @@ struct cnss_vreg_info {
+ 	u32 delay_us;
+ };
+ 
++struct cnss_gpio_info {
++	bool supported;
++	char *name;
++	u32 num;
++	bool state;
++};
++
+ struct cnss_pinctrl_info {
+ 	struct pinctrl *pinctrl;
+ 	struct pinctrl_state *bootstrap_active;
+@@ -166,8 +173,11 @@ struct cnss_pin_connect_result {
+ struct cnss_plat_data {
+ 	struct platform_device *plat_dev;
+ 	void *bus_priv;
++	u32 rc_idx;
+ 	struct cnss_vreg_info *vreg_info;
++	bool vreg_state;
+ 	struct cnss_pinctrl_info pinctrl_info;
++	struct cnss_gpio_info gpio_info;
+ 	struct cnss_subsys_info subsys_info;
+ 	struct cnss_ramdump_info ramdump_info;
+ 	struct cnss_ramdump_info_v2 ramdump_info_v2;
+@@ -204,6 +214,7 @@ struct cnss_plat_data {
+ 	u32 diag_reg_read_mem_type;
+ 	u32 diag_reg_read_len;
+ 	u8 *diag_reg_read_buf;
++	bool enumerate_done;
+ };
+ 
+ void *cnss_bus_dev_to_bus_priv(struct device *dev);
+@@ -212,6 +223,7 @@ int cnss_driver_event_post(struct cnss_plat_data *plat_priv,
+ 			   enum cnss_driver_event_type type,
+ 			   u32 flags, void *data);
+ int cnss_get_vreg(struct cnss_plat_data *plat_priv);
++int cnss_get_wlan_en_gpio(struct cnss_plat_data *plat_priv);
+ int cnss_get_pinctrl(struct cnss_plat_data *plat_priv);
+ int cnss_power_on_device(struct cnss_plat_data *plat_priv);
+ void cnss_power_off_device(struct cnss_plat_data *plat_priv);
+diff --git a/drivers/net/wireless/cnss2/pci.c b/drivers/net/wireless/cnss2/pci.c
+index d57d55e..81ebc2d 100644
+--- a/drivers/net/wireless/cnss2/pci.c
++++ b/drivers/net/wireless/cnss2/pci.c
+@@ -58,6 +58,8 @@ MODULE_PARM_DESC(fbc_bypass,
+ 		 "Bypass firmware download when loading WLAN driver");
+ #endif
+ 
++static bool cnss_pci_driver_loaded;
++
+ static int cnss_set_pci_config_space(struct cnss_pci_data *pci_priv, bool save)
+ {
+ 	struct pci_dev *pci_dev = pci_priv->pci_dev;
+@@ -1475,11 +1477,21 @@ static int cnss_pci_probe(struct pci_dev *pci_dev,
+ 	case QCA6174_DEVICE_ID:
+ 		pci_read_config_word(pci_dev, QCA6174_REV_ID_OFFSET,
+ 				     &pci_priv->revision_id);
+-		ret = cnss_suspend_pci_link(pci_priv);
+-		if (ret)
+-			cnss_pr_err("Failed to suspend PCI link, err = %d\n",
+-				    ret);
+-		cnss_power_off_device(plat_priv);
++		/* In two PCIe wlan cards use case, since cnss_pci_driver is
++		 * registered during the first device platform probe, so when
++		 * the second device platform probe happen, cnss_pci_driver
++		 * probe would be called before the second device enumerate
++		 * finish. cnss_pci_driver probe have suspend PCIe link action
++		 * that will make enumerate fail. Make sure enumerate finish
++		 * before suspend PCIe link.
++		 */
++		if (plat_priv->enumerate_done) {
++			ret = cnss_suspend_pci_link(pci_priv);
++			if (ret)
++				cnss_pr_err("Failed to suspend PCI link, err = %d\n",
++					    ret);
++			cnss_power_off_device(plat_priv);
++		}
+ 		break;
+ 	case QCA6290_EMULATION_DEVICE_ID:
+ 	case QCA6290_DEVICE_ID:
+@@ -1491,11 +1503,13 @@ static int cnss_pci_probe(struct pci_dev *pci_dev,
+ 			cnss_pci_disable_msi(pci_priv);
+ 			goto disable_bus;
+ 		}
+-		ret = cnss_suspend_pci_link(pci_priv);
+-		if (ret)
+-			cnss_pr_err("Failed to suspend PCI link, err = %d\n",
+-				    ret);
+-		cnss_power_off_device(plat_priv);
++		if (plat_priv->enumerate_done) {
++			ret = cnss_suspend_pci_link(pci_priv);
++			if (ret)
++				cnss_pr_err("Failed to suspend PCI link, err = %d\n",
++					    ret);
++			cnss_power_off_device(plat_priv);
++		}
+ 		break;
+ 	default:
+ 		cnss_pr_err("Unknown PCI device found: 0x%x\n",
+@@ -1518,6 +1532,7 @@ unregister_ramdump:
+ unregister_subsys:
+ 	cnss_unregister_subsys(plat_priv);
+ reset_ctx:
++	devm_kfree(&pci_dev->dev, pci_priv);
+ 	plat_priv->bus_priv = NULL;
+ out:
+ 	return ret;
+@@ -1550,6 +1565,7 @@ static void cnss_pci_remove(struct pci_dev *pci_dev)
+ 		cnss_pci_deinit_smmu(pci_priv);
+ 	cnss_unregister_ramdump(plat_priv);
+ 	cnss_unregister_subsys(plat_priv);
++	devm_kfree(&pci_dev->dev, pci_priv);
+ 	plat_priv->bus_priv = NULL;
+ }
+ 
+@@ -1599,11 +1615,26 @@ int cnss_pci_init(struct cnss_plat_data *plat_priv)
+ 		goto out;
+ 	}
+ 
+-	ret = pci_register_driver(&cnss_pci_driver);
+-	if (ret) {
+-		cnss_pr_err("Failed to register to PCI framework, err = %d\n",
+-			    ret);
+-		goto out;
++	plat_priv->enumerate_done = true;
++	/* Now enumerate is finished, try to suspend PCIe link */
++	if (plat_priv->bus_priv != NULL) {
++		ret = cnss_suspend_pci_link(plat_priv->bus_priv);
++		if (ret) {
++			cnss_pr_err("Failed to suspend PCI link, err = %d\n", ret);
++		}
++		cnss_power_off_device(plat_priv);
++	}
++
++	/* In two wlan cards use case, make sure cnss_pci_driver
++	 * not register two times */
++	if (!cnss_pci_driver_loaded) {
++		ret = pci_register_driver(&cnss_pci_driver);
++		if (ret) {
++			cnss_pr_err("Failed to register to PCI framework, err = %d\n",
++				    ret);
++			goto out;
++		}
++		cnss_pci_driver_loaded = true;
+ 	}
+ 
+ 	return 0;
+@@ -1614,4 +1645,5 @@ out:
+ void cnss_pci_deinit(struct cnss_plat_data *plat_priv)
+ {
+ 	pci_unregister_driver(&cnss_pci_driver);
++	cnss_pci_driver_loaded = false;
+ }
+diff --git a/drivers/net/wireless/cnss2/power.c b/drivers/net/wireless/cnss2/power.c
+index 8ed1507..4e8e48d 100644
+--- a/drivers/net/wireless/cnss2/power.c
++++ b/drivers/net/wireless/cnss2/power.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/delay.h>
+ #include <linux/of.h>
++#include <linux/of_gpio.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/regulator/consumer.h>
+ 
+@@ -35,9 +36,12 @@ static struct cnss_vreg_info cnss_vreg_info[] = {
+ 
+ #define BOOTSTRAP_GPIO			"qcom,enable-bootstrap-gpio"
+ #define BOOTSTRAP_ACTIVE		"bootstrap_active"
++#define WLAN_EN_VREG			"qcom,wlan-en-vreg-support"
+ #define WLAN_EN_GPIO			"wlan-en-gpio"
+ #define WLAN_EN_ACTIVE			"wlan_en_active"
+ #define WLAN_EN_SLEEP			"wlan_en_sleep"
++#define WLAN_EN_LOW			0
++#define WLAN_EN_HIGH			1
+ 
+ #define BOOTSTRAP_DELAY			1000
+ #define WLAN_ENABLE_DELAY		1000
+@@ -104,6 +108,7 @@ int cnss_get_vreg(struct cnss_plat_data *plat_priv)
+ 			    vreg_info->max_uv, vreg_info->load_ua,
+ 			    vreg_info->delay_us);
+ 	}
++	plat_priv->vreg_state = false;
+ 
+ 	return 0;
+ out:
+@@ -121,6 +126,11 @@ static int cnss_vreg_on(struct cnss_plat_data *plat_priv)
+ 		return -ENODEV;
+ 	}
+ 
++	if (plat_priv->vreg_state) {
++		cnss_pr_dbg("Vregs are already powered on\n");
++		return 0;
++	}
++
+ 	for (i = 0; i < CNSS_VREG_INFO_SIZE; i++) {
+ 		vreg_info = &plat_priv->vreg_info[i];
+ 
+@@ -182,6 +192,7 @@ static int cnss_vreg_on(struct cnss_plat_data *plat_priv)
+ 
+ 		return ret;
+ 	}
++	plat_priv->vreg_state = true;
+ 
+ 	return 0;
+ }
+@@ -197,6 +208,11 @@ static int cnss_vreg_off(struct cnss_plat_data *plat_priv)
+ 		return -ENODEV;
+ 	}
+ 
++	if (!plat_priv->vreg_state) {
++		cnss_pr_dbg("Vregs are already powered off\n");
++		return 0;
++	}
++
+ 	for (i = CNSS_VREG_INFO_SIZE - 1; i >= 0; i--) {
+ 		vreg_info = &plat_priv->vreg_info[i];
+ 
+@@ -227,9 +243,95 @@ static int cnss_vreg_off(struct cnss_plat_data *plat_priv)
+ 		}
+ 	}
+ 
++	plat_priv->vreg_state = false;
++
+ 	return ret;
+ }
+ 
++int cnss_get_wlan_en_gpio(struct cnss_plat_data *plat_priv)
++{
++	int ret = 0;
++	struct device *dev;
++	struct cnss_gpio_info *info;
++
++	if (!plat_priv)
++		return -EINVAL;
++
++	info = &plat_priv->gpio_info;
++	dev = &plat_priv->plat_dev->dev;
++
++	if (of_property_read_bool(dev->of_node, WLAN_EN_VREG)) {
++		cnss_pr_dbg("platform device using vdd wlan en\n");
++		goto out;
++	}
++
++	if (!of_find_property(dev->of_node, WLAN_EN_GPIO, NULL)) {
++		cnss_pr_dbg("No GPIO %s found\n", WLAN_EN_GPIO);
++		goto out;
++	}
++
++	ret = of_get_named_gpio(dev->of_node, WLAN_EN_GPIO, 0);
++	if (ret >= 0) {
++		info->supported = true;
++		info->name = WLAN_EN_GPIO;
++		info->num = ret;
++		info->state = WLAN_EN_LOW;
++		cnss_pr_dbg("%s: GPIO %d\n", WLAN_EN_GPIO, ret);
++	} else {
++		cnss_pr_err("Can't get gpio %s ret %d\n",
++			    WLAN_EN_GPIO, ret);
++		goto out;
++	}
++
++	ret = gpio_request(info->num, info->name);
++	if (ret) {
++		cnss_pr_err("gpio request %s failed ret %d\n",
++			    info->name, ret);
++		goto out;
++	}
++
++	ret = gpio_direction_output(info->num, info->state);
++	if (ret) {
++		cnss_pr_err("Can't set gpio direction %s state %d ret %d\n",
++			    info->name, info->state, ret);
++		goto err_gpio_dir;
++	}
++
++	return 0;
++
++err_gpio_dir:
++        gpio_free(info->num);
++
++out:
++	return ret;
++}
++
++static void cnss_set_wlan_en_gpio(struct cnss_plat_data *plat_priv, bool state)
++{
++	struct cnss_gpio_info *info;
++
++	if (!plat_priv)
++		return;
++
++	info = &plat_priv->gpio_info;
++	if (!info->supported)
++		return;
++
++	if (info->state == state) {
++		cnss_pr_dbg("%s: gpio already is %s\n",
++			    info->name, state ? "high" : "low");
++		return;
++	}
++
++	gpio_set_value(info->num, state);
++	info->state = state;
++
++        cnss_pr_dbg("%s: gpio is now %s\n",
++		    info->name, state ? "enabled" : "disabled");
++
++        msleep(WLAN_ENABLE_DELAY);
++}
++
+ int cnss_get_pinctrl(struct cnss_plat_data *plat_priv)
+ {
+ 	int ret = 0;
+@@ -258,28 +360,6 @@ int cnss_get_pinctrl(struct cnss_plat_data *plat_priv)
+ 		}
+ 	}
+ 
+-	if (of_find_property(dev->of_node, WLAN_EN_GPIO, NULL)) {
+-		pinctrl_info->wlan_en_active =
+-			pinctrl_lookup_state(pinctrl_info->pinctrl,
+-					     WLAN_EN_ACTIVE);
+-		if (IS_ERR_OR_NULL(pinctrl_info->wlan_en_active)) {
+-			ret = PTR_ERR(pinctrl_info->wlan_en_active);
+-			cnss_pr_err("Failed to get wlan_en active state, err = %d\n",
+-				    ret);
+-			goto out;
+-		}
+-
+-		pinctrl_info->wlan_en_sleep =
+-			pinctrl_lookup_state(pinctrl_info->pinctrl,
+-					     WLAN_EN_SLEEP);
+-		if (IS_ERR_OR_NULL(pinctrl_info->wlan_en_sleep)) {
+-			ret = PTR_ERR(pinctrl_info->wlan_en_sleep);
+-			cnss_pr_err("Failed to get wlan_en sleep state, err = %d\n",
+-				    ret);
+-			goto out;
+-		}
+-	}
+-
+ 	return 0;
+ out:
+ 	return ret;
+@@ -311,28 +391,6 @@ static int cnss_select_pinctrl_state(struct cnss_plat_data *plat_priv,
+ 			}
+ 			udelay(BOOTSTRAP_DELAY);
+ 		}
+-
+-		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_en_active)) {
+-			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+-						   pinctrl_info->
+-						   wlan_en_active);
+-			if (ret) {
+-				cnss_pr_err("Failed to select wlan_en active state, err = %d\n",
+-					    ret);
+-				goto out;
+-			}
+-			udelay(WLAN_ENABLE_DELAY);
+-		}
+-	} else {
+-		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_en_sleep)) {
+-			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+-						   pinctrl_info->wlan_en_sleep);
+-			if (ret) {
+-				cnss_pr_err("Failed to select wlan_en sleep state, err = %d\n",
+-					    ret);
+-				goto out;
+-			}
+-		}
+ 	}
+ 
+ 	return 0;
+@@ -350,6 +408,8 @@ int cnss_power_on_device(struct cnss_plat_data *plat_priv)
+ 		goto out;
+ 	}
+ 
++	cnss_set_wlan_en_gpio(plat_priv, WLAN_EN_HIGH);
++
+ 	ret = cnss_select_pinctrl_state(plat_priv, true);
+ 	if (ret) {
+ 		cnss_pr_err("Failed to select pinctrl state, err = %d\n", ret);
+@@ -365,6 +425,7 @@ out:
+ 
+ void cnss_power_off_device(struct cnss_plat_data *plat_priv)
+ {
++	cnss_set_wlan_en_gpio(plat_priv, WLAN_EN_LOW);
+ 	cnss_select_pinctrl_state(plat_priv, false);
+ 	cnss_vreg_off(plat_priv);
+ }
+diff --git a/include/net/cnss_logger.h b/include/net/cnss_logger.h
+new file mode 100644
+index 0000000..2b7b0d3
+--- /dev/null
++++ b/include/net/cnss_logger.h
+@@ -0,0 +1,59 @@
++/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++#ifndef _NET_CNSS_LOGGER_H_
++#define _NET_CNSS_LOGGER_H_
++
++struct sk_buff;
++struct wiphy;
++
++#ifdef CONFIG_CNSS_LOGGER
++int cnss_logger_event_register(int radio, int event,
++			       int (*cb)(struct sk_buff *skb));
++int cnss_logger_event_unregister(int radio, int event,
++				 int (*cb)(struct sk_buff *skb));
++int cnss_logger_device_register(struct wiphy *wiphy, const char *name);
++int cnss_logger_device_unregister(int radio, struct wiphy *wiphy);
++int cnss_logger_nl_ucast(struct sk_buff *skb, int portid, int flag);
++int cnss_logger_nl_bcast(struct sk_buff *skb, int portid, int flag);
++#else
++static inline int cnss_logger_event_register(int radio, int event,
++					     int (*cb)(struct sk_buff *skb))
++{
++	return 0;
++}
++static inline int cnss_logger_event_unregister(int radio, int event,
++					       int (*cb)(struct sk_buff *skb))
++{
++	return 0;
++}
++static inline int cnss_logger_device_register(struct wiphy *wiphy,
++					      const char *name)
++{
++	return 0;
++}
++static inline int cnss_logger_device_unregister(int radio, struct wiphy *wiphy)
++{
++	return 0;
++}
++static inline int cnss_logger_nl_ucast(struct sk_buff *skb, int portid,
++				       int flag)
++{
++	return 0;
++}
++static inline int cnss_logger_nl_bcast(struct sk_buff *skb, int portid,
++				       int flag)
++{
++	return 0;
++}
++#endif /* CONFIG_CNSS_LOGGER */
++#endif /* _NET_CNSS_H_ */
++
+-- 
+1.9.1
+

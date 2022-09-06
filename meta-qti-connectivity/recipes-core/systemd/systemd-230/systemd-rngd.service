@@ -1,0 +1,16 @@
+[Unit]
+Description=feed random number from /dev/hwrng to /dev/random
+Documentation=man:rngd(8) man:rngtest(1)
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=sysinit.target shutdown.target
+
+[Service]
+ExecStart=/sbin/start-stop-daemon -S -q -x /usr/sbin/rngd
+ExecStop=/sbin/start-stop-daemon -K -q -n /usr/sbin/rngd
+ExecReload=/sbin/start-stop-daemon -K -q -s 1 -x /usr/sbin/rngd
+Restart=always
+TimeoutSec=10s
+
+[Install]
+WantedBy=multi-user.target

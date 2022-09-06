@@ -1,0 +1,133 @@
+From 144c9583d2ba20e5c9376d3cb5c0ed63033d23d5 Mon Sep 17 00:00:00 2001
+From: Yue Ma <yuem@codeaurora.org>
+Date: Tue, 7 Aug 2018 16:47:09 -0700
+Subject: [PATCH 6/8] cnss2: Add force wake support
+
+As part of PCIe power management for new WLAN devices, it requires
+asserting WAKE register before accessing any MMIO registers outside
+first 4K range. Add the support in CNSS driver and expose the APIs
+for WLAN host driver.
+
+Change-Id: I69688c229121c12575dde4938961d60bc067751f
+Signed-off-by: Yue Ma <yuem@codeaurora.org>
+---
+ drivers/net/wireless/cnss2/pci.c | 88 ++++++++++++++++++++++++++++++++++++++++
+ include/net/cnss2.h              |  3 ++
+ 2 files changed, 91 insertions(+)
+
+diff --git a/drivers/net/wireless/cnss2/pci.c b/drivers/net/wireless/cnss2/pci.c
+index 8d4cd04..6d93764 100644
+--- a/drivers/net/wireless/cnss2/pci.c
++++ b/drivers/net/wireless/cnss2/pci.c
+@@ -732,6 +732,94 @@ int cnss_pm_request_resume(struct cnss_pci_data *pci_priv)
+ 	return pm_request_resume(&pci_dev->dev);
+ }
+ 
++#ifdef CONFIG_CNSS_QCA6390
++int cnss_pci_force_wake_request(struct device *dev)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct cnss_pci_data *pci_priv = cnss_get_pci_priv(pci_dev);
++	struct mhi_controller *mhi_ctrl;
++
++	if (!pci_priv)
++		return -ENODEV;
++
++	if (pci_priv->device_id != QCA6390_DEVICE_ID)
++		return 0;
++
++	mhi_ctrl = pci_priv->mhi_ctrl;
++	if (!mhi_ctrl)
++		return -EINVAL;
++
++	read_lock_bh(&mhi_ctrl->pm_lock);
++	mhi_ctrl->wake_get(mhi_ctrl, true);
++	read_unlock_bh(&mhi_ctrl->pm_lock);
++
++	return 0;
++}
++EXPORT_SYMBOL(cnss_pci_force_wake_request);
++
++int cnss_pci_is_device_awake(struct device *dev)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct cnss_pci_data *pci_priv = cnss_get_pci_priv(pci_dev);
++	struct mhi_controller *mhi_ctrl;
++
++	if (!pci_priv)
++		return -ENODEV;
++
++	if (pci_priv->device_id != QCA6390_DEVICE_ID)
++		return true;
++
++	mhi_ctrl = pci_priv->mhi_ctrl;
++	if (!mhi_ctrl)
++		return -EINVAL;
++
++	return mhi_ctrl->dev_state == MHI_STATE_M0 ? true : false;
++}
++EXPORT_SYMBOL(cnss_pci_is_device_awake);
++
++int cnss_pci_force_wake_release(struct device *dev)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct cnss_pci_data *pci_priv = cnss_get_pci_priv(pci_dev);
++	struct mhi_controller *mhi_ctrl;
++
++	if (!pci_priv)
++		return -ENODEV;
++
++	if (pci_priv->device_id != QCA6390_DEVICE_ID)
++		return 0;
++
++	mhi_ctrl = pci_priv->mhi_ctrl;
++	if (!mhi_ctrl)
++		return -EINVAL;
++
++	read_lock_bh(&mhi_ctrl->pm_lock);
++	mhi_ctrl->wake_put(mhi_ctrl, false);
++	read_unlock_bh(&mhi_ctrl->pm_lock);
++
++	return 0;
++}
++EXPORT_SYMBOL(cnss_pci_force_wake_release);
++#else
++int cnss_pci_force_wake_request(struct device *dev)
++{
++	return 0;
++}
++EXPORT_SYMBOL(cnss_pci_force_wake_request);
++
++int cnss_pci_is_device_awake(struct device *dev)
++{
++	return true;
++}
++EXPORT_SYMBOL(cnss_pci_is_device_awake);
++
++int cnss_pci_force_wake_release(struct device *dev)
++{
++	return 0;
++}
++EXPORT_SYMBOL(cnss_pci_force_wake_release);
++#endif
++
+ int cnss_pci_alloc_fw_mem(struct cnss_pci_data *pci_priv)
+ {
+ 	struct cnss_plat_data *plat_priv = pci_priv->plat_priv;
+diff --git a/include/net/cnss2.h b/include/net/cnss2.h
+index 78904c3..0845e23 100644
+--- a/include/net/cnss2.h
++++ b/include/net/cnss2.h
+@@ -175,6 +175,9 @@ extern void cnss_release_pm_sem(struct device *dev);
+ extern int cnss_wlan_pm_control(struct device *dev, bool vote);
+ extern int cnss_auto_suspend(struct device *dev);
+ extern int cnss_auto_resume(struct device *dev);
++extern int cnss_pci_force_wake_request(struct device *dev);
++extern int cnss_pci_is_device_awake(struct device *dev);
++extern int cnss_pci_force_wake_release(struct device *dev);
+ extern int cnss_get_user_msi_assignment(struct device *dev, char *user_name,
+ 					int *num_vectors,
+ 					uint32_t *user_base_data,
+-- 
+1.9.1
+

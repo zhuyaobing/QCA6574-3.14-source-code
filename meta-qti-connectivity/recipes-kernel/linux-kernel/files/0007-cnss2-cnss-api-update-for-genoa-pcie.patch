@@ -1,0 +1,42 @@
+From 0c6ce871a6e2285a2a6174459daf432685e1b768 Mon Sep 17 00:00:00 2001
+From: Jayachandran Sreekumaran <jsreekum@codeaurora.org>
+Date: Thu, 4 Oct 2018 16:06:06 +0530
+Subject: [PATCH 7/8] cnss2: cnss api update for genoa pcie
+
+cnss api update for genoa pcie to pass the memory information for
+read index update.
+
+Change-Id: Iac8c7addf77b5782b1b4347f448633b88f54b6e2
+Signed-off-by: Jayachandran Sreekumaran <jsreekum@codeaurora.org>
+---
+ include/net/cnss2.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/include/net/cnss2.h b/include/net/cnss2.h
+index 0845e23..6b7c724 100644
+--- a/include/net/cnss2.h
++++ b/include/net/cnss2.h
+@@ -115,6 +115,11 @@ struct cnss_shadow_reg_v2_cfg {
+ 	u32 addr;
+ };
+ 
++struct cnss_rri_over_ddr_cfg {
++	u32 base_addr_low;
++	u32 base_addr_high;
++};
++
+ struct cnss_wlan_enable_cfg {
+ 	u32 num_ce_tgt_cfg;
+ 	struct cnss_ce_tgt_pipe_cfg *ce_tgt_cfg;
+@@ -124,6 +129,8 @@ struct cnss_wlan_enable_cfg {
+ 	struct cnss_shadow_reg_cfg *shadow_reg_cfg;
+ 	u32 num_shadow_reg_v2_cfg;
+ 	struct cnss_shadow_reg_v2_cfg *shadow_reg_v2_cfg;
++	bool rri_over_ddr_cfg_valid;
++	struct cnss_rri_over_ddr_cfg rri_over_ddr_cfg;
+ };
+ 
+ enum cnss_driver_mode {
+-- 
+1.9.1
+

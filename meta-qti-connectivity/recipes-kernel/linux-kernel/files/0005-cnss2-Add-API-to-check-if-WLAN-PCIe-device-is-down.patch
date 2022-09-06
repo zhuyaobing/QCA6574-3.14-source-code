@@ -1,0 +1,63 @@
+From c50221e31b033702fd9bd8e6d98358b5f5cb779f Mon Sep 17 00:00:00 2001
+From: Yue Ma <yuem@codeaurora.org>
+Date: Mon, 10 Sep 2018 17:20:54 -0700
+Subject: [PATCH 5/8] cnss2: Add API to check if WLAN PCIe device is down
+
+API provision for WLAN host driver to check if WLAN PCIe device
+is down.
+
+Change-Id: I91efcd781af67c72b787c89e6b619c4cc49da34b
+Signed-off-by: Yue Ma <yuem@codeaurora.org>
+---
+ drivers/net/wireless/cnss2/pci.c | 21 +++++++++++++++++++++
+ include/net/cnss2.h              |  2 ++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/drivers/net/wireless/cnss2/pci.c b/drivers/net/wireless/cnss2/pci.c
+index 144ccde..8d4cd04 100644
+--- a/drivers/net/wireless/cnss2/pci.c
++++ b/drivers/net/wireless/cnss2/pci.c
+@@ -219,6 +219,27 @@ int cnss_pci_link_down(struct device *dev)
+ }
+ EXPORT_SYMBOL(cnss_pci_link_down);
+ 
++int cnss_pci_is_device_down(struct device *dev)
++{
++	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
++	struct cnss_pci_data *pci_priv;
++
++	if (!plat_priv) {
++		cnss_pr_err("plat_priv is NULL\n");
++		return -ENODEV;
++	}
++
++	pci_priv = plat_priv->bus_priv;
++	if (!pci_priv) {
++		cnss_pr_err("pci_priv is NULL\n");
++		return -ENODEV;
++	}
++
++	return test_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state) |
++		pci_priv->pci_link_down_ind;
++}
++EXPORT_SYMBOL(cnss_pci_is_device_down);
++
+ static int cnss_pci_init_smmu(struct cnss_pci_data *pci_priv)
+ {
+ 	int ret = 0;
+diff --git a/include/net/cnss2.h b/include/net/cnss2.h
+index a201960..78904c3 100644
+--- a/include/net/cnss2.h
++++ b/include/net/cnss2.h
+@@ -148,6 +148,8 @@ extern int cnss_wlan_register_driver(struct cnss_wlan_driver *driver);
+ extern void cnss_wlan_unregister_driver(struct cnss_wlan_driver *driver);
+ extern void cnss_device_crashed(struct device *dev);
+ extern int cnss_pci_link_down(struct device *dev);
++
++extern int cnss_pci_is_device_down(struct device *dev);
+ extern void cnss_schedule_recovery(struct device *dev,
+ 				   enum cnss_recovery_reason reason);
+ extern int cnss_self_recovery(struct device *dev,
+-- 
+1.9.1
+

@@ -1,0 +1,5 @@
+LK_SRC = "git://source.codeaurora.org/quic/la/kernel/lk"
+BRANCH = "LV.HB.1.1.1_rb1.46"
+SRCTAG = "LV.HB.1.1.1-36610-8x96.0"
+SRC_URI = "${LK_SRC};protocol=http;branch=${BRANCH};tag=${SRCTAG}"
+S =  "${WORKDIR}/git"

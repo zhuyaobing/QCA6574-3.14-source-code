@@ -1,0 +1,28 @@
+From: Rongjing Liao <liaor@codeaurora.org>
+Date: Thu, 12 Apr 2018 18:11:51 +0800
+Subject: [PATCH] poky: fix KW build issue
+
+KW build will generate log "ERROR: ld.so: object 'libkwinject.so' from
+LD_PRELOAD cannot be preloaded (cannot open shared object file): ignored".
+The "ERROR" will be tracked by log check, which will make build failed.
+This commit work as a workaround to make KW build go ahead.
+
+Change-Id: I734c8183227277861f2cdec4f5a38662d8b254de
+Signed-off-by: Rongjing Liao <liaor@codeaurora.org>
+
+diff --git a/meta/lib/oe/rootfs.py b/meta/lib/oe/rootfs.py
+index c4a5086..696fc22 100644
+--- a/meta/lib/oe/rootfs.py
++++ b/meta/lib/oe/rootfs.py
+@@ -378,7 +378,7 @@ class RpmRootfs(Rootfs):
+     def __init__(self, d, manifest_dir, progress_reporter=None):
+         super(RpmRootfs, self).__init__(d, progress_reporter)
+         self.log_check_regex = '(unpacking of archive failed|Cannot find package'\
+-                               '|exit 1|ERROR: |Error: |Error |ERROR '\
++                               '|exit 1|Error: |Error '\
+                                '|Failed |Failed: |Failed$|Failed\(\d+\):)'
+         self.manifest = RpmManifest(d, manifest_dir)
+
+--
+1.9.1
+
